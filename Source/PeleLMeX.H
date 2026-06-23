@@ -10,6 +10,7 @@
 #include "DiagBase.H"
 #include "PeleLMeX_FlowControllerData.H"
 #include "PeleLMeX_BPatch.H"
+#include "PeleLMeX_MeshMap.H"
 
 #ifdef AMREX_USE_ASCENT
 #include <AMReX_Conduit_Blueprint.H>
@@ -2313,6 +2314,49 @@ public:
   std::unique_ptr<Hydro::MacProjector> macproj;
   int m_macProjNeedReset{0};
   int m_macProjOldSize{0};
+
+  //-----------------------------------------------------------------------------
+  // Mesh mapping (optional single-block, axis-aligned stretched mesh).
+  // Controlled via the "geometry.mesh_mapping" input; when absent,
+  // m_mesh_map remains null and all metric-field machinery is bypassed.
+  std::unique_ptr<MeshMap> m_mesh_map;
+  bool m_mesh_mapping{false};
+
+  // Cached device-callable evaluator for the active mesh mapping.  See
+  // PeleLMeX_MeshMapEvaluator.H.  Defaults to Kind::Identity when no
+  // mapping is active; refreshed from m_mesh_map->make_evaluator()
+  // whenever the mapping is (re)created (Init and Regrid paths).  This
+  // is the conduit used by user initdata_mapped / bcnormal code to
+  // obtain physical-space coordinates without having to know which
+  // concrete map is active.
+  MeshMapEvaluator m_map_eval{};
+
+  // When true (and mesh mapping is active), WritePlotFile emits a
+  // nodal-displacement MultiFab alongside the cell-centered state so
+  // visualization tools can render the solution on the curvilinear
+  // physical grid rather than on the Xi-space AMReX grid when the
+  // plotfile metadata is recognized by the reader/plugin.
+  // Disable via `peleLM.plot_mesh_mapping = 0` to always write the
+  // standard Xi-space plotfile format.
+  int m_plot_mesh_mapping{1};
+
+  //! Access the MeshMap instance (nullptr if mesh mapping is disabled).
+  MeshMap* meshMap() noexcept { return m_mesh_map.get(); }
+  [[nodiscard]] const MeshMap* meshMap() const noexcept
+  {
+    return m_mesh_map.get();
+  }
+  [[nodiscard]] bool hasMeshMapping() const noexcept { return m_mesh_mapping; }
+
+  //! Cached device-callable physical-coordinate evaluator (Identity
+  //! when no mesh mapping is active).
+  [[nodiscard]] const MeshMapEvaluator& meshMapEvaluator() const noexcept
+  {
+    return m_map_eval;
+  }
+
+private:
+  //-----------------------------------------------------------------------------
 
   // Nodal projection
   int m_nodal_mg_max_coarsening_level = 100;
