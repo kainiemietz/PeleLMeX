@@ -89,8 +89,19 @@ constexpr int soot_bc[] = {
 amrex::InterpBase*
 PeleLM::
   getInterpolator( // NOLINT(readability-convert-member-functions-to-static)
-    const int a_method) const
+    const int a_method,
+    const int a_crse_level) const
 {
+  // Mesh-mapping-aware path: whole-state fillpatch helpers pass the
+  // coarse level of the pair (a_crse_level) to opt in; other callers
+  // leave it at the default -1 and get the legacy interpolator.
+  if (
+    a_method == 1 && m_mesh_mapping && a_crse_level >= 0 &&
+    a_crse_level < static_cast<int>(m_mapped_interps.size()) &&
+    m_mapped_interps[a_crse_level]) {
+    return m_mapped_interps[a_crse_level].get();
+  }
+
   amrex::InterpBase* mapper = nullptr;
 
   switch (a_method) {
@@ -500,8 +511,11 @@ PeleLM::fillpatch_state(
       {m_t_old[lev], m_t_new[lev]}, 0, 0, nCompState, geom[lev], bndry_func, 0);
   } else {
 
-    // Interpolator
-    auto* mapper = getInterpolator();
+    // Whole-state fill: request the mapping-aware interpolator for the
+    // lev-1 -> lev pair (its per-component weights serve both
+    // incompressible and compressible state).  getInterpolator falls back
+    // to the legacy interpolator when mesh mapping is off or unavailable.
+    auto* mapper = getInterpolator(1, lev - 1);
 
     amrex::PhysBCFunct<
       amrex::GpuBndryFuncFab<PeleLMCCFillExtDirState<ProblemSpecificFunctions>>>
@@ -1001,8 +1015,12 @@ PeleLM::fillcoarsepatch_state(
     fillFromRecyclingPlane(a_state, 0, lev);
   }
 
-  // Interpolator
-  auto* mapper = getInterpolator(m_regrid_interp_method);
+  // Whole-state coarse->fine fill: request the mapping-aware interpolator
+  // for the lev-1 -> lev pair (engages only with cell-conservative regrid
+  // interp, which it wraps; else getInterpolator returns the legacy one).
+  // Derived TEMP/RHORT are restored by the EOS recompute in
+  // MakeNewLevelFromCoarse / RemakeLevel.
+  auto* mapper = getInterpolator(m_regrid_interp_method, lev - 1);
 
   amrex::PhysBCFunct<
     amrex::GpuBndryFuncFab<PeleLMCCFillExtDirState<ProblemSpecificFunctions>>>
