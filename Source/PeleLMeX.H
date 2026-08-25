@@ -613,8 +613,6 @@ public:
     const amrex::Vector<amrex::Array<amrex::MultiFab*, AMREX_SPACEDIM>>&
       a_soretfluxes);
 
-
-
   /**
    * \brief Compute the explicit cell-centered diffusion term on all levels
    * by computing the divergence of the diffusion fluxes at Old or New time,
