@@ -81,6 +81,22 @@ PeleLM::Advance(const int is_initIter)
   //----------------------------------------------------------------
 
   //----------------------------------------------------------------
+
+  /* CDJ: Things to check if the lagged method doesn't converge
+  1. Instead of relying on foextrap Y_ghost for diffusion coefficients 
+  estimation, check whether finest level coeffs can be used (finer 
+  cells are averaged on coaser so avgdown doesn't change on the 
+  finest cell => coaser cells will have a avg of finer cells).
+  2. Diffops -> robin from amrex
+
+  Things to do consider later:
+  1. Move setIsothermalwallinjection injection to fillpatch calls so it is much more cleaner.
+  2 Instead of using isothermalnonslipwall as a phsical bc just use ADwall by adding a AD wall 
+  physical BC to the bcrecs and mirroring inflow mathematical treatments. Lot of restamping on the advection side and nodal proj side goes away.
+  Also remove any potential mismatched if there's any. Soret path become an bit of an issue, so is the 0th step (can be
+  fixed if n-1 ghost data is saved on every restart, on true 0th extrap or better init?).  
+  */
+  
   // Advance setup
   // Pre-SDC
   m_sdcIter = 0;
@@ -118,9 +134,12 @@ PeleLM::Advance(const int is_initIter)
   }
 
   // compute t^{n} data
-  calcViscosity(AmrOldTime);
+  //calcViscosity(AmrOldTime);
   if (m_incompressible == 0) {
     calcDiffusivity(AmrOldTime);
+    setIsothermalWallInjectionGhosts(AmrOldTime);
+    calcViscosity(AmrOldTime);
+
 #ifdef PELE_USE_PLASMA
     poissonSolveEF(AmrOldTime);
 #endif
@@ -146,7 +165,68 @@ PeleLM::Advance(const int is_initIter)
     //----------------------------------------------------------------
     BL_PROFILE_VAR("PeleLMeX::advance::diffusion", PLM_DIFF);
     const amrex::Real fluxfact = (m_nSDCmax > 1) ? 0.5 : 0.0;
+    /*CDJ: DIAGNOSTIC - hi-y wall GHOST state BEFORE diffusion terms */
+    /*if (m_nstep < 2) {
+      for (int lev = 0; lev <= finest_level; ++lev) {
+        auto* ldp = getLevelDataPtr(lev, AmrOldTime);
+        const amrex::Box& ddom = geom[lev].Domain();
+        const int jg = ddom.bigEnd(1) + 1;                       // hi-y wall ghost row
+        const int ii = (ddom.smallEnd(0) + ddom.bigEnd(0)) / 2;  // representative i
+        for (amrex::MFIter mfi(ldp->state); mfi.isValid(); ++mfi) {
+          if (mfi.validbox().contains(amrex::IntVect(AMREX_D_DECL(ii, jg-1, 0)))) {
+            auto const& s = ldp->state.const_array(mfi);
+            const amrex::Real rho = s(ii, jg, 0, DENSITY);
+            amrex::AllPrint pr;
+            pr << "[CDJ ghost BEFORE-diff lev" << lev << " (" << ii << "," << jg
+               << ")] rho=" << rho << " T=" << s(ii, jg, 0, TEMP)
+               << " u=" << s(ii, jg, 0, VELX) << " v=" << s(ii, jg, 0, VELY) << " Y:";
+            amrex::Real sm = 0.0;
+            for (int n = 0; n < NUM_SPECIES; ++n) {
+              pr << " " << s(ii, jg, 0, FIRSTSPEC + n) / rho;
+              sm += s(ii, jg, 0, FIRSTSPEC + n);
+            }
+            pr << " sumRhoY=" << sm << "\n";
+          }
+        }
+      }
+    }*/
+    /*CDJ: end update*/
+
     computeDifferentialDiffusionTerms(AmrOldTime, diffData, 0, fluxfact);
+
+    /*CDJ: DIAGNOSTIC - hi-y wall GHOST state AFTER diffusion terms */
+    /*if (m_nstep < 2) {
+      for (int lev = 0; lev <= finest_level; ++lev) {
+        auto* ldp = getLevelDataPtr(lev, AmrOldTime);
+        const amrex::Box& ddom = geom[lev].Domain();
+        const int jg = ddom.bigEnd(1) + 1;
+        const int ii = (ddom.smallEnd(0) + ddom.bigEnd(0)) / 2;
+        for (amrex::MFIter mfi(ldp->state); mfi.isValid(); ++mfi) {
+          if (mfi.validbox().contains(amrex::IntVect(AMREX_D_DECL(ii, jg-1, 0)))) {
+            auto const& s = ldp->state.const_array(mfi);
+            const amrex::Real rho = s(ii, jg, 0, DENSITY);
+            amrex::AllPrint pr;
+            pr << "[CDJ ghost AFTER-diff lev" << lev << " (" << ii << "," << jg
+               << ")] rho=" << rho << " T=" << s(ii, jg, 0, TEMP)
+               << " u=" << s(ii, jg, 0, VELX) << " v=" << s(ii, jg, 0, VELY) << " Y:";
+            amrex::Real sm = 0.0;
+            for (int n = 0; n < NUM_SPECIES; ++n) {
+              pr << " " << s(ii, jg, 0, FIRSTSPEC + n) / rho;
+              sm += s(ii, jg, 0, FIRSTSPEC + n);
+            }
+            pr << " sumRhoY=" << sm << "\n";
+          }
+        }
+      }
+    }*/
+    /*CDJ: end update*/ 
+
+    /*CDJ (moved): set AmrOldTime wall ghost for the advection injection (uses the
+           AmrOldTime diff_cc just computed; persists through the SDC loop since only
+           AmrNewTime is re-fillpatched inside it). */
+    //setIsothermalWallInjectionGhosts(AmrOldTime);
+    /*CDJ: end update*/
+
     BL_PROFILE_VAR_STOP(PLM_DIFF);
     //----------------------------------------------------------------
   }
@@ -226,6 +306,9 @@ PeleLM::Advance(const int is_initIter)
         is_initialization, computeDiffusionTerm, do_avgDown, AmrNewTime,
         diffData);
     }
+    /*CDJ: set AmrNewTime wall ghost after species fillpatch clobber */
+    setIsothermalWallInjectionGhosts(AmrNewTime);
+    /*CDJ: end update*/
   }
   //----------------------------------------------------------------
 
@@ -341,6 +424,11 @@ PeleLM::oneSDC(
     calcDiffusivity(AmrNewTime);
     const amrex::Real fluxfact = (sdcIter == m_nSDCmax) ? -0.5 : 0.0;
     computeDifferentialDiffusionTerms(AmrNewTime, diffData, 0, fluxfact);
+    
+    /*CDJ: re-set AmrNewTime wall ghost after its diffusion terms */
+    setIsothermalWallInjectionGhosts(AmrNewTime);
+    /*CDJ: end update*/
+    
     if (m_has_divu != 0) {
       constexpr int is_initialization = 0;    // Not here
       constexpr int computeDiffusionTerm = 0; // Nope, we just did that
@@ -419,6 +507,11 @@ PeleLM::oneSDC(
   // Compute \rho^{np1,k+1} and fillpatch new density
   updateDensity(advData);
   fillPatchDensity(AmrNewTime);
+  
+  /*CDJ: re-set AmrNewTime wall ghost after density fillpatch clobber */
+  setIsothermalWallInjectionGhosts(AmrNewTime);
+  /*CDJ: end update*/
+  
   if (m_verbose > 1) {
     amrex::Real ScalAdvEnd = amrex::ParallelDescriptor::second() - ScalAdvStart;
     amrex::ParallelDescriptor::ReduceRealMax(

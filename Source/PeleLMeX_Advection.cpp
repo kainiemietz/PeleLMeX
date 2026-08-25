@@ -3,6 +3,7 @@
 #include <PeleLMeX_Utils.H>
 #include <hydro_utils.H>
 
+#include <fstream> //CDJ: for std::ofstream wall-ghost history file
 void
 PeleLM::computeVelocityAdvTerm(const std::unique_ptr<AdvanceAdvData>& advData)
 {
@@ -360,6 +361,29 @@ PeleLM::computeScalarAdvTerms(const std::unique_ptr<AdvanceAdvData>& advData)
   //----------------------------------------------------------------
   // Get the BCRecs and AdvectionTypes
   auto bcRecSpec = fetchBCRecArray(FIRSTSPEC, NUM_SPECIES);
+  /*CDJ: AD injection - advection needs ext_dir species at isothermal walls so the
+         Godunov edge state = the injected ghost value (foextrap discards the ghost:
+         SetEdgeBCsHi hi=lo). Diffusion keeps its own foextrap BCRec (separate fetch),
+         so its Neumann/spec_boundary path is unaffected. */
+  if (m_advection_diffusion_BC != 0) {
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      const bool lo_iso =
+        (m_phys_bc.lo(idim) == BoundaryCondition::BCNoSlipWallIsotherm ||
+         m_phys_bc.lo(idim) == BoundaryCondition::BCSlipWallIsotherm);
+      const bool hi_iso =
+        (m_phys_bc.hi(idim) == BoundaryCondition::BCNoSlipWallIsotherm ||
+         m_phys_bc.hi(idim) == BoundaryCondition::BCSlipWallIsotherm);
+      for (int n = 0; n < NUM_SPECIES; ++n) {
+        if (lo_iso) {
+          bcRecSpec[n].setLo(idim, amrex::BCType::ext_dir);
+        }
+        if (hi_iso) {
+          bcRecSpec[n].setHi(idim, amrex::BCType::ext_dir);
+        }
+      }
+    }
+  }
+  /*CDJ: end update*/
   auto bcRecSpec_d = convertToDeviceVector(bcRecSpec);
   auto AdvTypeSpec = fetchAdvTypeArray(FIRSTSPEC, NUM_SPECIES);
   auto AdvTypeSpec_d = convertToDeviceVector(AdvTypeSpec);
@@ -402,6 +426,33 @@ PeleLM::computeScalarAdvTerms(const std::unique_ptr<AdvanceAdvData>& advData)
 
     // Get level data ptr Old
     auto* ldata_p = getLevelDataPtr(lev, AmrOldTime);
+
+    /*CDJ: DIAGNOSTIC - hi-y wall normal velocity as the ADVECTION sees it: the MAC
+           face velocity vmac (drives the flux; should be <0 = INTO domain) vs the BC
+           ghost VELY vs the interior cell VELY. Prints first 2 steps + every 50. */
+    /*if (m_nstep < 2 || m_nstep % 50 == 0) {
+      const amrex::Box& ddom = geom[lev].Domain();
+      const int jg = ddom.bigEnd(1) + 1;                       // hi-y wall face / ghost
+      const int ii = (ddom.smallEnd(0) + ddom.bigEnd(0)) / 2;  // representative i
+      for (amrex::MFIter mfi(ldata_p->state); mfi.isValid(); ++mfi) {
+        if (mfi.validbox().contains(amrex::IntVect(AMREX_D_DECL(ii, jg - 1, 0)))) {
+          auto const& s = ldata_p->state.const_array(mfi);
+          auto const& vmac = advData->umac[lev][1].const_array(mfi);
+          const amrex::Real rho_g = s(ii, jg, 0, DENSITY);
+          amrex::AllPrint() << "[CDJ adv-wall lev" << lev << " step" << m_nstep
+            << " (" << ii << "," << jg << ")] vmac_wallface=" << vmac(ii, jg, 0)
+            << " VELY_ghost=" << s(ii, jg, 0, VELY)
+            << " VELY_interior=" << s(ii, jg - 1, 0, VELY)
+            << " VELY_interior=" << s(ii, jg - 1, 0, VELY)
+            << " | Yghost H2=" << s(ii, jg, 0, FIRSTSPEC + H2_ID) / rho_g
+            << " CO2=" << s(ii, jg, 0, FIRSTSPEC + CO2_ID) / rho_g
+            << " CH4=" << s(ii, jg, 0, FIRSTSPEC + CH4_ID) / rho_g
+            << " O2=" << s(ii, jg, 0, FIRSTSPEC + O2_ID) / rho_g
+            << " N2=" << s(ii, jg, 0, FIRSTSPEC + N2_ID) / rho_g << "\n";
+        }
+      }
+    }*/
+    /*CDJ: end update*/
 
     // Define edge state: Density + Species + RhoH + Temp
     constexpr int nGrow = 0;

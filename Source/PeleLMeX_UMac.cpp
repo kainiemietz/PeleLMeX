@@ -210,6 +210,30 @@ PeleLM::macProject(
 
   // Get face rho inv
   auto bcRec = fetchBCRecArray(DENSITY, 1);
+  
+  /*CDJ: with AD injection the isothermal-wall ghost holds the injection density
+    rho_g (stamped) and the wall is treated as an inflow, so relabel the density
+    BCRec foextrap -> ext_dir at those faces: getDiffusivity's cen2edge then
+    puts rho_g (hence the injection-side 1/rho) at the wall face, mirroring the
+    ext_dir treatment at the jet inflow. Verified: this bcRec feeds only the
+    getDiffusivity face-averaging below, not the MAC projector's LinOp BCs
+    (those come from getMACProjectionBC). */
+  if (m_advection_diffusion_BC != 0) {
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      const auto bc_lo = m_phys_bc.lo(idim);
+      const auto bc_hi = m_phys_bc.hi(idim);
+      if (bc_lo == BoundaryCondition::BCNoSlipWallIsotherm ||
+          bc_lo == BoundaryCondition::BCSlipWallIsotherm) {
+        bcRec[0].setLo(idim, amrex::BCType::ext_dir);
+      }
+      if (bc_hi == BoundaryCondition::BCNoSlipWallIsotherm ||
+          bc_hi == BoundaryCondition::BCSlipWallIsotherm) {
+        bcRec[0].setHi(idim, amrex::BCType::ext_dir);
+      }
+    }
+  }
+  /*CDJ: end update*/
+
   amrex::Vector<amrex::Array<amrex::MultiFab, AMREX_SPACEDIM>> rho_inv(
     finest_level + 1);
   for (int lev = 0; lev <= finest_level; ++lev) {

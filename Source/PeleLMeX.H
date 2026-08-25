@@ -613,6 +613,15 @@ public:
     const amrex::Vector<amrex::Array<amrex::MultiFab*, AMREX_SPACEDIM>>&
       a_soretfluxes);
 
+  /*CDJ: step 6 - set the isothermal-wall ghost with the fixed-mass-flux injection
+         state for the ADVECTION solve. Recomputes Y_ghost (same Robin as
+         correctIsothermalBoundary), then rho_g via EOS at (Y_ghost,T_wall,P) and sets
+         DENSITY, rhoY_ghost, RhoH_ghost, and normal velocity (fixed-mass-flx/DENSITY). 
+         TEMP & tangential vel stay from bcnormal. Must be re-called after every fillpatch 
+         that clobbers the ghost. */
+  void setIsothermalWallInjectionGhosts(const TimeStamp& a_time);
+  /*CDJ: end update*/
+
   /**
    * \brief Compute the explicit cell-centered diffusion term on all levels
    * by computing the divergence of the diffusion fluxes at Old or New time,
@@ -2240,6 +2249,15 @@ public:
   int m_use_wbar = 1;
   int m_use_soret = 0;
   int m_soret_boundary_override = 0;
+  
+  /*CDJ: AD boundary flags and injection array
+  */
+  int m_advection_diffusion_BC = 0;
+  amrex::Real m_AD_mdot_wall = 0.0; //fixed injection mass flux
+  amrex::Gpu::DeviceVector<amrex::Real> m_AD_Y_wall_d; //fixed injected species mass fraction
+  /*CDJ: end update
+  */
+
   // LES Model
   bool m_do_les = false;
   bool m_plot_les = false;

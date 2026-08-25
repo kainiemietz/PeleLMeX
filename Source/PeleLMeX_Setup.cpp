@@ -145,6 +145,14 @@ PeleLM::Setup()
             amrex::Print() << "    Imposing inhomogeneous Neumann conditions "
                               "for species on isothermal walls. WARNING: "
                               "use_wbar disabled. \n";
+
+              /*CDJ: verbose print if AD boundary enabled.
+              */
+              if (m_advection_diffusion_BC != 0) {
+                amrex::Print()<< "    Imposing advection + diffusion boundary conditions at the isothermal wall"<< std::endl;
+              }
+              /*CDJ: end update
+              */ 
           }
         }
       } else {
@@ -628,6 +636,11 @@ PeleLM::readParameters()
   amrex::ParmParse pptrans("transport");
   pptrans.query("use_soret", m_use_soret);
   pp.query("use_wbar", m_use_wbar);
+  /*CDJ: query the flag from the input file for AD boundary
+  */
+  pp.query("advection_diffusion_BC", m_advection_diffusion_BC);
+  /*CDJ: end update
+  */
   if (m_use_soret != 0) {
     bool isothermal = false;
     for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {

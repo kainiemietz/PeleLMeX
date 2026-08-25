@@ -517,6 +517,20 @@ PeleLM::velocityProjection(
 #endif
   }
 
+  /*CDJ: AD BC - restore the isothermal-wall injection normal-velocity ghost that
+         setBndry(0.0) just wiped (vel is an ALIAS of the state, so the state ghost
+         is wiped too). setInflowBoundaryVel re-fills via bcnormal, which deliberately
+         leaves the wall VELY=0. Without this the nodal projection sees an impermeable wall and
+         projects the wall-normal inflow back out every step. The helper is
+         internally gated on m_advection_diffusion_BC != 0 and writes ONLY
+         isothermal-wall ghost normal velocity (+ scalars). Restricted to the full (non-incremental)
+         projection. NOTE: runs after scaleProj_RZ (r*vel scaling) -
+         fine in Cartesian ???? has to confirm later; the stamped ghost would need r-scaling ?????. */
+  if (incremental == 0) {
+    setIsothermalWallInjectionGhosts(AmrNewTime);
+  }
+  /*CDJ: end update*/
+
   // To ensure integral of RHS is zero for closed chamber, get mean divU
   amrex::Real SbarOld = 0.0;
   amrex::Real SbarNew = 0.0;
@@ -750,6 +764,29 @@ PeleLM::doNodalProject(
       } else {
         hibc[idim] = amrex::LinOpBCType::Neumann;
       }
+
+      /*CDJ: AD BC - the isothermal injection wall carries a prescribed NONZERO
+             normal ghost velocity, which for the nodal
+             projector is the definition of an 'inflow' boundary, not an
+             impermeable 'Neumann' wall. With the Neumann label, parts of
+             MLNodeLaplacian exclude the boundary ghost velocity from the
+             divergence
+             (Tangential ghost is zeroed by the inflow transverse-velocity
+             handling, which matches the no-slip VELX=0 anyway.) */
+      if (m_advection_diffusion_BC != 0) {
+        const auto bclo_phys = m_phys_bc.lo(idim);
+        const auto bchi_phys = m_phys_bc.hi(idim);
+        if (bclo_phys == BoundaryCondition::BCNoSlipWallIsotherm ||
+            bclo_phys == BoundaryCondition::BCSlipWallIsotherm) {
+          lobc[idim] = amrex::LinOpBCType::inflow;
+        }
+        if (bchi_phys == BoundaryCondition::BCNoSlipWallIsotherm ||
+            bchi_phys == BoundaryCondition::BCSlipWallIsotherm) {
+          hibc[idim] = amrex::LinOpBCType::inflow;
+        }
+      }
+      /*CDJ: end update*/
+
     }
   }
 
@@ -819,6 +856,38 @@ PeleLM::doNodalProject(
       amrex::Abort("MLMG solve for nodal_projection failed");
     }
   }
+
+  /*CDJ: DIAGNOSTIC - localize the nodal residual floor. Recompute the
+         POST-projection nodal RHS field (div(u) - S =  (what the solve
+         seemed to could not remove) via the projector's own public computeRHS, then
+         print the max |residual| and its (lev,i,j) node. */
+  /* if (m_advection_diffusion_BC != 0) {
+    Vector<MultiFab> nresid(finest_level + 1);
+    Vector<MultiFab*> nresid_p(finest_level + 1);
+    for (int lev = 0; lev <= finest_level; ++lev) {
+      nresid[lev].define(
+        amrex::convert(grids[lev], IntVect::TheNodeVector()), dmap[lev], 1, 0);
+      nresid_p[lev] = &nresid[lev];
+    }
+    nodal_projector->computeRHS(nresid_p, a_vel, rhs_cc, rhs_nd);
+    for (int lev = 0; lev <= finest_level; ++lev) {
+      const Real gmax = nresid[lev].norm0();
+      // Owner rank(s) of the max print its node location
+      for (MFIter mfi(nresid[lev]); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.validbox();
+        auto const& r = nresid[lev].const_array(mfi);
+        amrex::LoopOnCpu(bx, [&](int i, int j, int k) {
+          if (std::abs(r(i, j, k)) >= gmax * (1.0 - 1.e-12) && gmax > 0.0) {
+            amrex::AllPrint()
+              << "[CDJ nodal-resid lev" << lev << " step" << m_nstep
+              << "] max|div(u)-S| = " << gmax << " at node (" << i << "," << j
+              << ")\n";
+          }
+        });
+      }
+    }
+  } */
+  /*CDJ: end update*/
 
   auto phi = nodal_projector->getPhi();
   auto gphi = nodal_projector->getGradPhi();

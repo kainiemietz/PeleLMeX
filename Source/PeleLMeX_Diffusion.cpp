@@ -419,6 +419,13 @@ PeleLM::correctIsothermalBoundary(
   auto bcRecSpec = fetchBCRecArray(FIRSTSPEC, NUM_SPECIES);
   const bool need_explicit_fluxes = a_soretfluxes.empty();
 
+  /*CDJ: AD wall BC inputs for the device lamda
+  */
+  const amrex::Real* Y_inj_p = m_AD_Y_wall_d.data(); //injected Y_k at the isothermal wall
+  const amrex::Real mdot_wall = m_AD_mdot_wall; //fixed injected mass flux at the isothermal wall
+  const int ad_bc = m_advection_diffusion_BC;
+  /*CDJ: end update*/
+
   amrex::Vector<amrex::Array<amrex::MultiFab*, AMREX_SPACEDIM>> soretfluxes(
     finest_level + 1);
   if (need_explicit_fluxes) { // need to fill the soret fluxes ourselves
@@ -469,9 +476,19 @@ PeleLM::correctIsothermalBoundary(
                                   : rhoD_ec;
         auto const& boundary_ar = a_spec_boundary[lev]->array(mfi);
         const auto use_wbar = m_use_wbar;
+        
+	/*CDJ: get cell centered data and the distance for the AD solve
+        */
+        auto const& state_cc = ldata_p->state.const_array(mfi); //cell centered state of the mf
+        const amrex::Real dx_full = geom[lev].CellSize(idim); //full cell width of the level
+        const amrex::Real dx_half = dx_full/2;
+        /*CDJ: end update
+        */
+
         amrex::ParallelFor(
           ebx, [bc_lo, bc_hi, idim, need_explicit_fluxes, edomain, flux_soret,
                 rhoD_ec, flux_wbar, boundary_ar,
+		state_cc, Y_inj_p, mdot_wall, ad_bc, dx_full,
                 use_wbar] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
             int idx[3] = {i, j, k};
             const bool on_lo =
@@ -486,6 +503,18 @@ PeleLM::correctIsothermalBoundary(
               if (on_lo) { // need to move -1 for lo boundary
                 idx[idim] -= 1;
               }
+              /*CDJ: get the interior cell => one step towards the domain
+              */
+              int cell_in[3] = {idx[0], idx[1], idx[2]};
+              if (on_hi){cell_in[idim] -= 1;} else{cell_in[idim] += 1;}
+
+              //get the second interior cell => two step towards the domain
+              int cell_in2[3] = {cell_in[0], cell_in[1], cell_in[2]};
+              if (on_hi){cell_in2[idim] -= 1;} else{cell_in[idim] += 1;}
+
+              /*CDJ: end update
+              */             
+
               for (int n = 0; n < NUM_SPECIES; ++n) {
                 boundary_ar(idx[0], idx[1], idx[2], n) = flux_soret(i, j, k, n);
                 // add lagged wbar flux
@@ -494,11 +523,52 @@ PeleLM::correctIsothermalBoundary(
                     flux_wbar(i, j, k, n);
                 }
                 boundary_ar(idx[0], idx[1], idx[2], n) /= rhoD_ec(i, j, k, n);
+                /*CDJ: add advection-diffusion gradient with a fixed mass flux
+                dY/dx = mdot*(8*Y_inj + Y_C2 - 9*Y_C1)/(3*dx*mdot + 8*roh_w*D_w) with dx = full cell width
+                things to consider rho_w*D_w is not the correct density and diffusivity as both depends on the Y_ghost value (low Peclet # can break the logic).
+                rhoD_ec is foextrap'ed at the moment and needs to be changed to iter(n-1) : saving is okay but at restart and when AMR is active become complex 
+                */
+                if(ad_bc != 0){
+                  amrex::Real rhoD = rhoD_ec(i, j, k, n);
+                  amrex::Real rho_C1  = state_cc(cell_in[0], cell_in[1], cell_in[2], DENSITY);
+                  amrex::Real Y_C1  = state_cc(cell_in[0], cell_in[1], cell_in[2], FIRSTSPEC + n) / rho_C1;
+                  amrex::Real rho_C2  = state_cc(cell_in2[0], cell_in2[1], cell_in2[2], DENSITY);
+                  amrex::Real Y_C2  = state_cc(cell_in2[0], cell_in2[1], cell_in2[2], FIRSTSPEC + n) / rho_C2;
+                  
+                  const amrex::Real sgn = on_hi ? 1.0 : -1.0;
+		  boundary_ar(idx[0], idx[1], idx[2], n) +=
+                    sgn * mdot_wall * (8*Y_inj_p[n] + Y_C2 - 9*Y_C1) / (8*rhoD + 3*mdot_wall * dx_full);
+                }
+                /*CDJ: end update
+                */
               }
             }
           });
       }
     }
+    /*CDJ: DIAGNOSTIC (point 2) - hi-y wall diffusive flux (rhoD*dY/dn) + gradient */
+    //if (m_nstep < 2) {
+    //  const amrex::Box& ddom = geom[lev].Domain();
+    //  const int jg = ddom.bigEnd(1) + 1;                       // hi-y wall face/ghost
+    //  const int ii = (ddom.smallEnd(0) + ddom.bigEnd(0)) / 2;  // representative i
+    //  for (amrex::MFIter mfi(*a_spec_boundary[lev]); mfi.isValid(); ++mfi) {
+    //    if (mfi.validbox().contains(amrex::IntVect(AMREX_D_DECL(ii, jg-1, 0)))) {
+    //      auto const& bar = a_spec_boundary[lev]->const_array(mfi);
+    //      auto const& bec = beta_ec[1].const_array(mfi); // y-edge rho*D
+    //      amrex::AllPrint pr;
+    //      pr << "[CDJ wall-flux lev" << lev << " (" << ii << "," << jg
+    //         << ") explicit=" << (need_explicit_fluxes ? 1 : 0) << "]";
+    //      for (int n = 0; n < NUM_SPECIES; ++n) {
+    //        const amrex::Real g = bar(ii, jg, 0, n);   // dY/dn (Neumann value)
+    //        const amrex::Real rd = bec(ii, jg, 0, n);  // rho*D at wall face
+    //        pr << " n" << n << "[dYdn=" << g << ",rhoD=" << rd
+    //           << ",flux=" << rd * g << "]";
+    //      }
+    //      pr << "\n";
+    //    }
+    //  }
+    //}
+    /*CDJ: end update*/
   }
   // TODO: wbar fluxes disabled for this case - boundary system becomes complex
   for (int lev = 0; lev <= finest_level; ++lev) {
@@ -507,6 +577,150 @@ PeleLM::correctIsothermalBoundary(
     }
   }
 }
+
+/*CDJ: set isothermal-wall ghost with the fixed-mass-flux injection state
+       for the ADVECTION solve (ext_dir override makes the Godunov edge = this ghost).
+       Y_ghost = (mdot*Y_inj*dx + rhoD*Y_cell)/(rhoD + mdot*dx)  [FULL dx, sum-normalized]
+       rho_g   = EOS(Y_ghost, T_wall, P)                          [cold, consistent density]
+       -> DENSITY=rho_g, rhoY=rho_g*Y_ghost, RhoH=rho_g*h(Y_ghost,T_wall),
+          normal vel = sgn*mdot/rho_g  (so (rho*U)_face = mdot exactly).
+       TEMP (=T_wall) and tangential velocity come from bcnormal (left untouched).
+       v1: recomputes Y_ghost each call (same getDiffusivity+Robin as the diffusion). */
+void
+PeleLM::setIsothermalWallInjectionGhosts(const TimeStamp& a_time)
+{
+  BL_PROFILE("PeleLMeX::setIsothermalWallInjectionGhosts()");
+  if (m_advection_diffusion_BC == 0) {
+    return;
+  }
+  auto bcRecSpec = fetchBCRecArray(FIRSTSPEC, NUM_SPECIES); // foextrap: cen2edge rho*D for now need to change into iter (n-1) values which is complex
+  const amrex::Real* Y_inj_p = m_AD_Y_wall_d.data();
+  const amrex::Real mdot_wall = m_AD_mdot_wall;
+  auto const* leosparm = eos_parms.device_parm();
+  const amrex::Real P_cgs = prob_parm->P_mean * 10.0; // thermodynamic pressure, CGS
+
+  for (int lev = 0; lev <= finest_level; ++lev) {
+    auto* ldata_p = getLevelDataPtr(lev, a_time);
+    amrex::MultiFab& beta_cc = ldata_p->diff_cc;
+    const amrex::Box& domain = geom[lev].Domain();
+    constexpr int doZeroVisc = 1;
+    constexpr int addTurb = 0;
+    amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> beta_ec =
+      getDiffusivity(lev, 0, NUM_SPECIES, doZeroVisc, bcRecSpec, beta_cc, addTurb);
+    
+    //grow beta_ec
+    const int nGrowStamp = m_nGrowState;
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      amrex::MultiFab beta_g(
+        beta_ec[idim].boxArray(), beta_ec[idim].DistributionMap(), NUM_SPECIES,
+        nGrowStamp, amrex::MFInfo(), Factory(lev));
+      beta_g.setVal(0.0);
+      amrex::MultiFab::Copy(beta_g, beta_ec[idim], 0, 0, NUM_SPECIES, 0);
+      beta_g.FillBoundary(geom[lev].periodicity());
+      beta_ec[idim] = std::move(beta_g);
+    }
+    //grow beta_ec end
+    
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(ldata_p->state, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+      for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+        const auto bc_lo = m_phys_bc.lo(idim);
+        const auto bc_hi = m_phys_bc.hi(idim);
+        const bool lo_iso = (bc_lo == BoundaryCondition::BCNoSlipWallIsotherm ||
+                             bc_lo == BoundaryCondition::BCSlipWallIsotherm);
+        const bool hi_iso = (bc_hi == BoundaryCondition::BCNoSlipWallIsotherm ||
+                             bc_hi == BoundaryCondition::BCSlipWallIsotherm);
+        if (!lo_iso && !hi_iso) {
+          continue;
+        }
+        const amrex::Box& edomain = amrex::surroundingNodes(domain, idim);
+        //const amrex::Box& ebx = mfi.nodaltilebox(idim);
+        
+	amrex::IntVect ngrow(nGrowStamp);
+        ngrow[idim] = 0;
+        amrex::Box ebx = mfi.grownnodaltilebox(idim, ngrow);
+        ebx &= edomain;
+
+        auto const& state_a = ldata_p->state.array(mfi);
+        auto const& rhoD_ec = beta_ec[idim].const_array(mfi);
+        const amrex::Real dx = geom[lev].CellSize(idim); // FULL cell width
+        amrex::ParallelFor(
+          ebx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            int idx[3] = {i, j, k};
+            const bool on_lo = lo_iso && (idx[idim] <= edomain.smallEnd(idim));
+            const bool on_hi = hi_iso && (idx[idim] >= edomain.bigEnd(idim));
+            if (!on_lo && !on_hi) {
+              return;
+            }
+            if (on_lo) {
+              idx[idim] -= 1; // idx now = ghost cell
+            }
+            int cin1[3] = {idx[0], idx[1], idx[2]};
+            int cin2[3] = {idx[0], idx[1], idx[2]};
+            if (on_hi) {
+              cin1[idim] -= 1;
+              cin2[idim] -= 2;
+            } else {
+              cin1[idim] += 1;
+              cin2[idim] += 2;
+            } // cins = first and second interior cells
+
+            const int sgn = on_hi ? -1 : 1; // normal velocity: into domain
+            const amrex::Real rho_C1 = state_a(cin1[0], cin1[1], cin1[2], DENSITY);
+            const amrex::Real rho_C2 = state_a(cin2[0], cin2[1], cin2[2], DENSITY);
+             /*CDJ: stamp the WALL value Y_w in the ghost slot. Advection and MAC
+              consume an ext_dir ghost as the face state
+              (AMReX-Hydro SetEdgeBCsHi / SetExtrapVelBCsHi), so the wall value
+              is what they need ????, and pairing it with the Y'_w handed to the
+              diffusion solve in correctIsothermalBoundary makes the total wall
+              species flux mdot*Y_w + rhoD_w*Y'_w = mdot*Y_inj.
+              
+              NOTE the nodal divergence (mlndlap_divu) instead reads this slot as
+              a CELL-CENTRE value; if that proves to matter, stamp the cell-centre
+              ghost Y_G = Y_C1 + h*Y'_w for the velocity at the projection
+              re-stamp site only. */
+
+            amrex::Real Yg[NUM_SPECIES];
+            amrex::Real Ysum = 0.0;
+            for (int n = 0; n < NUM_SPECIES; ++n) {
+              const amrex::Real rhoD = rhoD_ec(i, j, k, n);
+              const amrex::Real Y_C1 =
+                state_a(cin1[0], cin1[1], cin1[2], FIRSTSPEC + n) / rho_C1;
+              const amrex::Real Y_C2 = 
+                state_a(cin2[0], cin2[1], cin2[2], FIRSTSPEC + n) / rho_C2;
+              Yg[n] = (3*mdot_wall * Y_inj_p[n] * dx + rhoD * (9*Y_C1-Y_C2)) /
+                      (8*rhoD + 3*mdot_wall * dx);
+              
+              //Yg[n] = Y_C1 + dx * mdot_wall * (8*Y_inj_p[n] + Y_C2 - 9*Y_C1) / (8*rhoD + 3*mdot_wall * dx);
+              
+              //Yg[n] = amrex::max(0.0, amrex::min(1.0, Yg[n])); //clamping the mass frac as it is computed with a extrapolation
+              Ysum += Yg[n];
+            }
+            for (int n = 0; n < NUM_SPECIES; ++n) {
+              Yg[n] /= Ysum;
+            }
+            // ghost density from EOS at (Y_ghost, T_wall, P)
+            auto eos = pele::physics::PhysicsType::eos(leosparm);
+            const amrex::Real T_w = state_a(idx[0], idx[1], idx[2], TEMP); // = T_wall
+            amrex::Real rho_cgs = 0.0;
+            eos.PYT2R(P_cgs, Yg, T_w, rho_cgs);
+            const amrex::Real rho_g = rho_cgs * 1.0e3; // CGS -> MKS
+            state_a(idx[0], idx[1], idx[2], DENSITY) = rho_g;
+            for (int n = 0; n < NUM_SPECIES; ++n) {
+              state_a(idx[0], idx[1], idx[2], FIRSTSPEC + n) = rho_g * Yg[n];
+            }
+            amrex::Real h_cgs = 0.0;
+            eos.TY2H(T_w, Yg, h_cgs);
+            state_a(idx[0], idx[1], idx[2], RHOH) = h_cgs * 1.0e-4 * rho_g;
+            state_a(idx[0], idx[1], idx[2], VELX + idim) = sgn * mdot_wall / rho_g;
+          });
+      }
+    }
+  }
+}
+/*CDJ: end update*/
 
 void
 PeleLM::computeDifferentialDiffusionFluxes(
@@ -1369,6 +1583,9 @@ PeleLM::differentialDiffusionUpdate(
 
   // FillPatch the new species before computing flux correction terms
   fillPatchSpecies(AmrNewTime);
+  /*CDJ: reset AmrNewTime wall ghost after species fillpatch clobber */
+  setIsothermalWallInjectionGhosts(AmrNewTime);
+  /*CDJ: end update*/
 
   // Adjust species diffusion fluxes to ensure their sum is zero
   adjustSpeciesFluxes<pele::physics::PhysicsType::eos_type>(
@@ -1496,6 +1713,10 @@ PeleLM::differentialDiffusionUpdate(
 
   // FillPatch species again before going into the enthalpy solve
   fillPatchSpecies(AmrNewTime);
+
+  /*CDJ: reset AmrNewTime wall ghost after species fillpatch clobber */
+  setIsothermalWallInjectionGhosts(AmrNewTime);
+  /*CDJ: end update*/
 
   // If doing species balances, compute face domain integrals
   // using level 0 since we've averaged down the fluxes already
@@ -1939,6 +2160,28 @@ PeleLM::computeDivTau(
   // Get the density component BCRec to get viscosity on faces
   auto bcRec = fetchBCRecArray(DENSITY, 1);
 
+  /*CDJ: with AD injection the isothermal-wall ghost holds the injection state
+    (rho_g, Y_inj, T_wall) and the wall is treated as an inflow, so relabel the
+    density BCRec foextrap -> ext_dir at those faces. getDiffusivity's cen2edge
+    then takes the ghost (injection-side) viscosity at the wall face instead of
+    the interior value. Verified: a_bcrec in compute_divtau feeds getDiffusivity
+    only (DiffusionOp.cpp), NOT the tensor-solve LinOp BCs. */
+  if (m_advection_diffusion_BC != 0) {
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      const auto bc_lo = m_phys_bc.lo(idim);
+      const auto bc_hi = m_phys_bc.hi(idim);
+      if (bc_lo == BoundaryCondition::BCNoSlipWallIsotherm ||
+          bc_lo == BoundaryCondition::BCSlipWallIsotherm) {
+        bcRec[0].setLo(idim, amrex::BCType::ext_dir);
+      }
+      if (bc_hi == BoundaryCondition::BCNoSlipWallIsotherm ||
+          bc_hi == BoundaryCondition::BCSlipWallIsotherm) {
+        bcRec[0].setHi(idim, amrex::BCType::ext_dir);
+      }
+    }
+  }
+  /*CDJ: end update*/
+
   if (use_density != 0) {
     getDiffusionTensorOp()->compute_divtau(
       a_divtau, GetVecOfConstPtrs(getVelocityVect(a_time)),
@@ -1974,6 +2217,26 @@ PeleLM::diffuseVelocity()
     auto& vel_mf = getLevelDataPtr(lev, AmrNewTime)->state;
     setInflowBoundaryVel(vel_mf, lev, AmrNewTime);
   }
+
+  /*CDJ: same as computeDivTau -- AD injection wall treated as inflow: relabel
+    density BCRec foextrap -> ext_dir at isothermal walls
+    value. Verified: a_bcrec in diffuse_velocity feeds getDiffusivity only
+    (DiffusionOp.cpp), NOT the tensor-solve LinOp BCs. */
+  if (m_advection_diffusion_BC != 0) {
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      const auto bc_lo = m_phys_bc.lo(idim);
+      const auto bc_hi = m_phys_bc.hi(idim);
+      if (bc_lo == BoundaryCondition::BCNoSlipWallIsotherm ||
+          bc_lo == BoundaryCondition::BCSlipWallIsotherm) {
+        bcRec[0].setLo(idim, amrex::BCType::ext_dir);
+      }
+      if (bc_hi == BoundaryCondition::BCNoSlipWallIsotherm ||
+          bc_hi == BoundaryCondition::BCSlipWallIsotherm) {
+        bcRec[0].setHi(idim, amrex::BCType::ext_dir);
+      }
+    }
+  }
+  /*CDJ: end update*/
 
   // CrankNicholson 0.5 coeff
   const amrex::Real dt_lcl = 0.5 * m_dt;
