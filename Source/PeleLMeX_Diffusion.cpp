@@ -4,6 +4,7 @@
 #include <PeleLMeX_K.H>
 #include <PeleLMeX_DiffusionOp.H>
 #include <AMReX_PlotFileUtil.H>
+#include <AMReX_FilCC_C.H>
 #include <memory>
 
 #ifdef AMREX_USE_EB
@@ -619,8 +620,17 @@ PeleLM::setIsothermalWallInjectionGhosts(const TimeStamp& a_time)
       beta_g.FillBoundary(geom[lev].periodicity());
       beta_ec[idim] = std::move(beta_g);
     }
-    //grow beta_ec end
-    
+    //grow beta_ec
+    amrex::Vector<amrex::Gpu::DeviceVector<amrex::BCRec>> bcrec_tan_d(AMREX_SPACEDIM);
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      auto bcr_tan = fetchBCRecArray(0, NVAR);
+      for (auto& b : bcr_tan) {
+        b.setLo(idim, amrex::BCType::int_dir);
+        b.setHi(idim, amrex::BCType::int_dir);
+      }
+      bcrec_tan_d[idim] = convertToDeviceVector(bcr_tan);
+    }
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
@@ -641,7 +651,14 @@ PeleLM::setIsothermalWallInjectionGhosts(const TimeStamp& a_time)
 	amrex::IntVect ngrow(nGrowStamp);
         ngrow[idim] = 0;
         amrex::Box ebx = mfi.grownnodaltilebox(idim, ngrow);
-        ebx &= edomain;
+        amrex::Box ebx_all = ebx;
+        amrex::Box clampbox = edomain;
+        for (int itan = 0; itan < AMREX_SPACEDIM; ++itan) {
+          if (itan != idim && geom[lev].isPeriodic(itan)) {
+            clampbox.grow(itan, nGrowStamp);
+          }
+        }
+        ebx &= clampbox;
 
         auto const& state_a = ldata_p->state.array(mfi);
         auto const& rhoD_ec = beta_ec[idim].const_array(mfi);
@@ -715,6 +732,26 @@ PeleLM::setIsothermalWallInjectionGhosts(const TimeStamp& a_time)
             eos.TY2H(T_w, Yg, h_cgs);
             state_a(idx[0], idx[1], idx[2], RHOH) = h_cgs * 1.0e-4 * rho_g;
             state_a(idx[0], idx[1], idx[2], VELX + idim) = sgn * mdot_wall / rho_g;
+          });
+
+          const amrex::BCRec* bcr_tan_p = bcrec_tan_d[idim].data();
+          amrex::ParallelFor(
+            ebx_all, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+              int idx[3] = {i, j, k};
+              const bool on_lo = lo_iso && (idx[idim] <= edomain.smallEnd(idim));
+              const bool on_hi = hi_iso && (idx[idim] >= edomain.bigEnd(idim));
+              if (!on_lo && !on_hi) {
+                return;
+              }
+              if (on_lo) {
+                idx[idim] -= 1; // idx now = ghost cell
+              }
+              const amrex::IntVect iv(AMREX_D_DECL(idx[0], idx[1], idx[2]));
+              amrex::FilccCell{}(
+                iv, state_a, DENSITY, RHOH - DENSITY + 1, domain, bcr_tan_p,
+                DENSITY);
+              amrex::FilccCell{}(
+                iv, state_a, VELX + idim, 1, domain, bcr_tan_p, VELX + idim);
           });
       }
     }
