@@ -423,7 +423,6 @@ PeleLM::correctIsothermalBoundary(
   /*CDJ: AD wall BC inputs for the device lamda
   */
   const amrex::Real* Y_inj_p = m_AD_Y_wall_d.data(); //injected Y_k at the isothermal wall
-  const amrex::Real mdot_wall = m_AD_mdot_wall; //fixed injected mass flux at the isothermal wall
   const int ad_bc = m_advection_diffusion_BC;
   /*CDJ: end update*/
 
@@ -477,6 +476,9 @@ PeleLM::correctIsothermalBoundary(
                                   : rhoD_ec;
         auto const& boundary_ar = a_spec_boundary[lev]->array(mfi);
         const auto use_wbar = m_use_wbar;
+	
+	const amrex::Real mdot_wall_lo = m_AD_mdot_wall_lo[idim]; //knie
+	const amrex::Real mdot_wall_hi = m_AD_mdot_wall_hi[idim]; //knie
         
 	/*CDJ: get cell centered data and the distance for the AD solve
         */
@@ -489,7 +491,7 @@ PeleLM::correctIsothermalBoundary(
         amrex::ParallelFor(
           ebx, [bc_lo, bc_hi, idim, need_explicit_fluxes, edomain, flux_soret,
                 rhoD_ec, flux_wbar, boundary_ar,
-		state_cc, Y_inj_p, mdot_wall, ad_bc, dx_full,
+		state_cc, Y_inj_p, mdot_wall_lo, mdot_wall_hi, ad_bc, dx_full,
                 use_wbar] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
             int idx[3] = {i, j, k};
             const bool on_lo =
@@ -537,6 +539,7 @@ PeleLM::correctIsothermalBoundary(
                   amrex::Real Y_C2  = state_cc(cell_in2[0], cell_in2[1], cell_in2[2], FIRSTSPEC + n) / rho_C2;
                   
                   const amrex::Real sgn = on_hi ? 1.0 : -1.0;
+                  const amrex::Real mdot_wall = on_hi ? mdot_wall_hi : mdot_wall_lo; //knie
 		  boundary_ar(idx[0], idx[1], idx[2], n) +=
                     sgn * mdot_wall * (8*Y_inj_p[n] + Y_C2 - 9*Y_C1) / (8*rhoD + 3*mdot_wall * dx_full);
                 }
@@ -596,7 +599,6 @@ PeleLM::setIsothermalWallInjectionGhosts(const TimeStamp& a_time)
   }
   auto bcRecSpec = fetchBCRecArray(FIRSTSPEC, NUM_SPECIES); // foextrap: cen2edge rho*D for now need to change into iter (n-1) values which is complex
   const amrex::Real* Y_inj_p = m_AD_Y_wall_d.data();
-  const amrex::Real mdot_wall = m_AD_mdot_wall;
   auto const* leosparm = eos_parms.device_parm();
   const amrex::Real P_cgs = prob_parm->P_mean * 10.0; // thermodynamic pressure, CGS
 
@@ -660,6 +662,8 @@ PeleLM::setIsothermalWallInjectionGhosts(const TimeStamp& a_time)
         }
         ebx &= clampbox;
 
+  	const amrex::Real mdot_wall_lo = m_AD_mdot_wall_lo[idim]; //knie
+  	const amrex::Real mdot_wall_hi = m_AD_mdot_wall_hi[idim]; //knie
         auto const& state_a = ldata_p->state.array(mfi);
         auto const& rhoD_ec = beta_ec[idim].const_array(mfi);
         const amrex::Real dx = geom[lev].CellSize(idim); // FULL cell width
@@ -685,6 +689,7 @@ PeleLM::setIsothermalWallInjectionGhosts(const TimeStamp& a_time)
             } // cins = first and second interior cells
 
             const int sgn = on_hi ? -1 : 1; // normal velocity: into domain
+            const amrex::Real mdot_wall = on_hi ? mdot_wall_hi : mdot_wall_lo; //knie
             const amrex::Real rho_C1 = state_a(cin1[0], cin1[1], cin1[2], DENSITY);
             const amrex::Real rho_C2 = state_a(cin2[0], cin2[1], cin2[2], DENSITY);
              /*CDJ: stamp the WALL value Y_w in the ghost slot. Advection and MAC

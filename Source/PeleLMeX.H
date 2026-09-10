@@ -2253,7 +2253,11 @@ public:
   /*CDJ: AD boundary flags and injection array
   */
   int m_advection_diffusion_BC = 0;
-  amrex::Real m_AD_mdot_wall = 0.0; //fixed injection mass flux
+  // knie: individual m_dots for all BCs
+  amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_AD_mdot_wall_lo {
+    AMREX_D_DECL(0.0, 0.0, 0.0)};
+  amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_AD_mdot_wall_hi {
+    AMREX_D_DECL(0.0, 0.0, 0.0)};
   amrex::Gpu::DeviceVector<amrex::Real> m_AD_Y_wall_d; //fixed injected species mass fraction
   /*CDJ: end update
   */
