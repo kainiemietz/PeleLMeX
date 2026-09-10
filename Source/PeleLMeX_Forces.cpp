@@ -204,8 +204,8 @@ PeleLM::addSpark(const TimeStamp a_timestamp)
         *m_extSource[lev],
         [statema, extma, leosparm, dx, spark_idx,
          spark_duration = m_spark_duration[n], spark_temp = m_spark_temp[n],
-         spark_radius = m_spark_radius
-           [n]] AMREX_GPU_DEVICE(int box_no, int i, int j, int k) noexcept {
+         spark_radius = m_spark_radius[n]] 
+	 AMREX_GPU_DEVICE(int box_no, int i, int j, int k) noexcept {
           auto eos = pele::physics::PhysicsType::eos(leosparm);
           const amrex::Real dist_to_center = std::sqrt(AMREX_D_TERM(
             (i - spark_idx[0]) * (i - spark_idx[0]) * dx[0] * dx[0],
