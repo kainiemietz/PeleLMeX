@@ -721,6 +721,7 @@ PeleLM::readParameters()
       "If specifying a species name map, length must equal number of species");
   }
   pp.query("initDataPlt_reset_time", m_do_reset_time);
+  pp.query("initDataPlt_coarsen", m_initDataPlt_coarsen);
 
   // -----------------------------------------
   // advance
