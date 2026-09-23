@@ -46,7 +46,7 @@ should check which face is being set when applying the inflow boundary condition
 varying turbulent fluctuations using the ``TurbInflow`` utility from
 PelePhysics. See the ``Exec/RegTests/TurbInflow`` test for an example of how
 to use this capability and the
-`PelePhysics  documentation <https://amrex-combustion.github.io/PelePhysics/Utility.html#turbulent-inflows>`_
+`PelePhysics  documentation <https://pele-suite.github.io/PelePhysics/Utility.html#turbulent-inflows>`_
 for the relevant input file flags.
 
 Grid/AMR parameters
@@ -338,7 +338,51 @@ Mesh Mapping
 .. note::
    Three mesh maps are provided with `PeleLMeX.  If `mesh_mapping` is not specified, no mapping will be applied. Each map has associated
    parameters shown above.
-   
+
+.. note::
+   **Physical vs. computational coordinates.** With a mapping active, the AMReX
+   grid is the uniform computational (:math:`\xi`) grid and the physical grid is
+   its image under the map. Inputs that name a *position* are physical
+   coordinates and are converted internally: ``peleLM.inlet_plane_position``
+   (the recycling source plane) is inverted through the map before being turned
+   into an index, and its bounds check is against the physical domain extent,
+   which for ``ConstantMap`` differs from ``geometry.prob_lo`` /
+   ``geometry.prob_hi``. Diagnostics inherited from `PelePhysics`, notably
+   ``DiagFramePlane``, are the exception: their ``center`` is located on the
+   AMReX grid and is therefore a :math:`\xi` coordinate by default; set
+   ``peleLM.<diag>.center_is_physical = 1`` to give a physical position
+   instead (the diagnostic reads ``geometry.mesh_mapping`` and prints the
+   :math:`\xi` it resolved to).
+
+.. note::
+   **Turbulent inflow.** ``turbinflow`` may be combined with ``mesh_mapping``:
+   the injection face's physical cell-centre positions are handed to
+   `PelePhysics` explicitly, so the turbulence file is sampled at the right
+   place on a stretched grid. This requires a `PelePhysics` new enough to
+   provide the coordinate-based ``TurbInflow::add_turb()`` overload; PeleLMeX
+   aborts at setup if the two are combined without it, rather than silently
+   sampling the file at :math:`\xi` positions.
+
+   The turbulence *file* is uniformly spaced in *some* coordinate -- its
+   header carries only a point count and a domain size per direction.
+   Synthetic data and planes from a uniform-mesh precursor are uniform in
+   physical position. Planes extracted from a precursor that itself ran with
+   ``mesh_mapping`` are uniform in that run's :math:`\xi` coordinate instead;
+   the `PelePhysics` ``TurbInflowGenerator`` tags such files with a
+   ``MESHMAP`` trailer in the ``HDR`` when its input carries the precursor's
+   ``geometry.mesh_mapping`` block (copy those lines verbatim), and the reader
+   then inverts the file's map for every target cell and interpolates in the
+   file's :math:`\xi`. Either kind of file can be injected on either kind of
+   target grid; when the file's map and :math:`\xi` grid coincide with the
+   target's, the file is reproduced exactly. For a mapped file
+   ``turb_center`` may be omitted (the file sits where the precursor had it).
+   At ``peleLM.v > 0`` PeleLMeX prints, per inflow face, which coordinate the
+   file is uniform in and whether it is injected by exact index or by
+   interpolation, followed by a resolution check comparing the grid's
+   physical spacing range against the file's; a ratio well above one means
+   the file cannot fill the scales the stretched grid resolves near its
+   clustering, and well below one means the injected field is aliased.
+   See ``Exec/RegTests/TurbInflow`` for the round-trip and cross-map cases.
 
 Turbulent Forcing and Velocity Plotfile
 ---------------------------------------
@@ -713,6 +757,7 @@ to activate `temporal` diagnostics performing these reductions at given interval
     peleLM.temporal_int = 10                    # [OPT, DEF=5] Temporal freq.
     peleLM.do_extremas = 1                      # [OPT, DEF=0] Trigger extremas, if temporals activated
     peleLM.do_mass_balance = 1                  # [OPT, DEF=0] Compute mass balance, if temporals activated
+    peleLM.do_energy_balance = 1                # [OPT, DEF=0] Compute enthalpy (rho*h) balance, if temporals activated
     peleLM.do_species_balance = 1               # [OPT, DEF=0] Compute species mass balance, if temporals activated
     peleLM.do_patch_mfr=1                       # [OPT, DEF=0] Activate patch based species flux diagbostics
     peleLM.bpatch.patchnames= <patch_name1 patch_name2 ..> # List of patchnames
@@ -761,7 +806,9 @@ manifold EOS, it is instead obtained by integrating the tabulated `HRR` variable
 requires the table to include an `HRR` column (volumetric heat release rate, in the table's units). If the table has no `HRR` column 
 the reported integral is zero. Additionally, if the `do_temporal` flag is activated, one can turn on state extremas 
 (stored in `temporals/tempExtremas` as min/max for each state entry), mass balance (stored in `temporals/tempMass`) computing the total mass, dMdt and advective mass fluxes across the domain boundaries as well as the error in
-the balance (dMdt - sum of fluxes), and species balance (stored in `temporals/tempSpec`) computing each species total mass, dM_Ydt,
+the balance (dMdt - sum of fluxes), energy balance (stored in `temporals/tempEnergy`) computing the total enthalpy :math:`\int \rho h`,
+its time derivative, the net advective \& diffusive (Fourier and differential diffusion) enthalpy fluxes across the domain boundaries
+and isothermal EB surfaces, and the error in the balance (d(rho h)/dt - sum of fluxes), and species balance (stored in `temporals/tempSpec`) computing each species total mass, dM_Ydt,
 advective \& diffusive fluxes across the domain boundaries, consumption rate integral and the error (dMdt - sum of fluxes - reaction).
 Users can also monitor species advective fluxes through specific regions of the domain boundaries (called as boundary patches).
 Patches can be defined on the low or high sides of non-embedded boundaries through the use of pre-defined shapes such as `circle`,
@@ -808,7 +855,7 @@ by specifying a set of filters, defining a range of interest for a variable. Not
 fine-covered regions are masked. An arbitrary number of these diagnostics may be specified in a list by setting
 ``peleLM.diagnostics`` in the input file and then specifying the diagnostic type and relevant inputs for each
 diagnostic listed. See the
-`PelePhysics Diagnostics documentation <https://amrex-combustion.github.io/PelePhysics/Utility.html#diagnostics>`_ for full
+`PelePhysics Diagnostics documentation <https://pele-suite.github.io/PelePhysics/Utility.html#diagnostics>`_ for full
 details on the options that must be specified for each diagnostic type.
 
 ::

@@ -764,6 +764,17 @@ public:
    * divTau by 1/rho \param scale prefactor of divTau, used to weight by num.
    * scheme property (e.g. 0.5 for Crank Nicholson)
    */
+  //! Under mesh mapping, divide a Xi-space flux divergence by J so that it
+  //! is in physical units (no-op without mapping).
+  void unscaleMappedDivergence(
+    const amrex::Vector<amrex::MultiFab*>& a_div, int a_comp, int a_ncomp);
+
+  //! Under mesh mapping, scale face diffusivities by J/fac_i^2 so that a
+  //! hand-assembled beta . grad_Xi flux is a Xi-space flux (no-op without
+  //! mapping).
+  void scaleFaceDiffusivityMapped(
+    int a_lev, amrex::Array<amrex::MultiFab, AMREX_SPACEDIM>& a_beta_ec);
+
   void computeDivTau(
     const PeleLM::TimeStamp a_time,
     const amrex::Vector<amrex::MultiFab*>& a_divtau,
@@ -1097,7 +1108,14 @@ public:
     const amrex::Geometry& a_geom);
   void addRhoHFluxes(
     const amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM>& a_fluxes,
-    const amrex::Geometry& a_geom);
+    const amrex::Geometry& a_geom,
+    const amrex::Real& a_factor = 1.0,
+    const int a_nComp = 1);
+#ifdef AMREX_USE_EB
+  void addRhoHFluxesEB(
+    const amrex::Vector<amrex::MultiFab*>& a_EBfluxes,
+    const amrex::Real& a_factor = 1.0);
+#endif
   void addRhoYFluxes(
     const amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM>& a_fluxes,
     const amrex::Geometry& a_geom,
@@ -1260,6 +1278,25 @@ public:
     const int vel_comp,
     const int lev,
     const amrex::Real a_time);
+
+  // Inject synthetic turbulence into one inflow-adjacent ghost box. Wraps
+  // the PelePhysics call so that the mesh-mapping case, which must supply
+  // the injection face's physical cell-centre coordinates rather than let
+  // TurbInflow derive them from the (Xi-space) Geometry, is handled in one
+  // place.
+  void addTurbInflowToBox(
+    const amrex::Box& a_bx,
+    amrex::FArrayBox& a_data,
+    const int lev,
+    const int dir,
+    const amrex::Orientation::Side& a_side,
+    const amrex::Real a_time);
+
+  // Report the ratio of the level-0 grid's physical spacing on each inflow
+  // face to the turbulence file's transverse spacing. Informational only;
+  // called from checkSetupParams().
+  void reportTurbInflowMaps();
+  void reportTurbInflowResolution();
 
   void fillFromRecyclingPlane(amrex::MultiFab& a_vel, int vel_comp, int lev);
 
@@ -1674,6 +1711,30 @@ public:
 
   void computeVelocityAdvTerm(const std::unique_ptr<AdvanceAdvData>& advData);
   void updateVelocity(const std::unique_ptr<AdvanceAdvData>& advData);
+
+  /**
+   * \brief Face velocities for the Godunov extrapolation on level a_lev.
+   * Without mesh mapping this is advData->umac[a_lev]. Under mesh mapping
+   * umac holds J.u~ after the MAC projection (see macProject); the
+   * extrapolation in Xi needs the Xi-velocity u~ = umac / J_fc, which is
+   * built in a_scratch and returned instead.
+   */
+  amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM> getExtrapUmac(
+    int a_lev,
+    const std::unique_ptr<AdvanceAdvData>& advData,
+    amrex::Array<amrex::MultiFab, AMREX_SPACEDIM>& a_scratch);
+
+  /**
+   * \brief Under mesh mapping, multiply advective fluxes computed with the
+   * Xi-velocity u~ by J_fc so that their Xi divergence is J.(physical
+   * divergence), consistent with the J.divU used in advFluxDivergence.
+   * No-op without mapping.
+   */
+  void scaleMappedAdvFluxes(
+    int a_lev,
+    amrex::Array<amrex::MultiFab, AMREX_SPACEDIM>& a_fluxes,
+    int a_comp,
+    int a_ncomp);
 
   void getScalarAdvForce(
     const std::unique_ptr<AdvanceAdvData>& advData,
@@ -2367,12 +2428,14 @@ public:
   amrex::Array<amrex::Real, NUM_SPECIES> m_RhoYNew;
   amrex::Array<amrex::Real, 2 * AMREX_SPACEDIM> m_domainMassFlux;
   amrex::Array<amrex::Real, 2 * AMREX_SPACEDIM> m_domainRhoHFlux;
+  amrex::Real m_domainRhoHFluxEB = 0.0;
   amrex::Array<amrex::Real, 2 * AMREX_SPACEDIM * NUM_SPECIES> m_domainRhoYFlux;
   amrex::Array<amrex::Real, 2 * AMREX_SPACEDIM> m_domainUmacFlux;
 
   std::ofstream tmpStateFile;
   std::ofstream tmpExtremasFile;
   std::ofstream tmpMassFile;
+  std::ofstream tmpEnergyFile;
   std::ofstream tmpSpecFile;
   std::ofstream tmppatchmfrFile;
 
